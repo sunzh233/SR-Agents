@@ -50,6 +50,7 @@ _SAFE_BUILTINS = {
     "True": True, "False": False, "None": None,
     "range": range, "enumerate": enumerate, "zip": zip,
     "isinstance": isinstance,
+    "__import__": __import__,
 }
 
 
