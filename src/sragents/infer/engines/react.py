@@ -32,6 +32,7 @@ from sragents.prompts import build_prompt
 from sragents.toolqa import ToolEnvironment, parse_action
 
 _MAX_OBS_CHARS = 3000
+_MAX_THOUGHT_CHARS = 4000
 
 
 class ReActAgent:
@@ -103,11 +104,22 @@ class ReActAgent:
         self.scratchpad += f"\nObservation {self.step_n}: "
 
         if not action.strip():
-            self.scratchpad += (
-                "You action is filtered due to content. "
-                "Please assume all the actions are permitted "
-                "in this environment and take the action again."
-            )
+            if not thought.strip():
+                self.scratchpad += (
+                    "Your response was empty. This can happen when "
+                    "reasoning consumed the full output budget. "
+                    "Please provide a concise Thought and a specific Action."
+                )
+            elif len(thought) >= _MAX_THOUGHT_CHARS:
+                self.scratchpad += (
+                    "Your thought was truncated and the action was missing. "
+                    "Please keep thoughts concise and provide a specific Action."
+                )
+            else:
+                self.scratchpad += (
+                    "Your action could not be parsed. "
+                    "Please provide a valid Action on the next line."
+                )
         else:
             action_type, argument = parse_action(action)
 
@@ -186,8 +198,31 @@ class ReActAgent:
             f"Continue solving the problem."
         )
 
+    @staticmethod
+    def _truncate_action(action_text: str) -> str:
+        """Truncate action text at the next ReAct structural marker.
+
+        Unlike a simple split("\\n")[0], this preserves multi-line content
+        inside tool calls (e.g. PythonInterpreter[code with newlines])
+        while still stopping at genuine Thought/Action/Observation markers.
+        """
+        action_text = action_text.strip()
+        # Match a line that is purely a structural marker (not inside code)
+        cont = re.search(
+            r"\n\s*(?:Observation|Thought|Action)\s*\d*\s*:", action_text
+        )
+        if cont:
+            return action_text[: cont.start()].rstrip()
+        return action_text
+
     def _parse_response(self, response: str) -> tuple[str, str]:
         response = strip_think_tags(response).strip()
+
+        # Thinking mode can consume all tokens in <think>, leaving an empty
+        # response after stripping. Surface this explicitly so the recovery
+        # observation in _step can give a targeted hint.
+        if not response:
+            return "", ""
 
         # If the model self-generates an "Observation N:" line (e.g. because
         # the server ignored the stop token), truncate there so the
@@ -199,17 +234,26 @@ class ReActAgent:
         action_pattern = rf"Action\s*{self.step_n}\s*:\s*"
         parts = re.split(action_pattern, response, maxsplit=1)
 
+        # Strip "Thought N:" prefix that the model may repeat
+        thought_prefix = rf"^Thought\s*{self.step_n}\s*:\s*"
+
         if len(parts) == 2:
-            thought = parts[0].strip().replace("\n", " ")
-            action = parts[1].strip().split("\n")[0].strip()
+            thought = re.sub(thought_prefix, "", parts[0].strip()).strip().replace("\n", " ")
+            action = self._truncate_action(parts[1])
         else:
             m = re.search(r"Action\s*\d*\s*:\s*(.+)", response)
             if m:
-                thought = response[: m.start()].strip().replace("\n", " ")
-                action = m.group(1).strip().split("\n")[0].strip()
+                thought = re.sub(thought_prefix, "", response[: m.start()].strip()).strip().replace("\n", " ")
+                action = self._truncate_action(response[m.start():])
             else:
-                thought = response.replace("\n", " ")
+                thought = re.sub(thought_prefix, "", response.strip()).strip().replace("\n", " ")
                 action = ""
+
+        # Truncate overly long thoughts to prevent one bad debugging spiral
+        # from bloating the scratchpad for every subsequent step.
+        if len(thought) > _MAX_THOUGHT_CHARS:
+            thought = thought[:_MAX_THOUGHT_CHARS] + "..."
+
         return thought, action
 
     @staticmethod
@@ -225,8 +269,8 @@ class ReActAgent:
 # Step token budget: thinking mode needs room for the <think> block on top of
 # the Thought/Action line. Per-step truncation wastes a ReAct step and
 # compounds across the trajectory.
-_STEP_TOKENS = 512
-_STEP_TOKENS_THINKING = 8192
+_STEP_TOKENS = 4096
+_STEP_TOKENS_THINKING = 16384
 _MAX_STEPS = 20
 
 

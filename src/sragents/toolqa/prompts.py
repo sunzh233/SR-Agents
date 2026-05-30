@@ -19,4 +19,17 @@ REACT_INSTRUCTION = """Solve a question answering task with interleaving Thought
 (11) SQLInterpreter[SQL], which interprets the SQL query SQL and returns the result.
 (12) PythonInterpreter[Python], which interprets the Python code Python and returns the result.
 (13) Finish[answer], which returns the answer and finishes the task.
-You may take as many steps as necessary."""
+You may take as many steps as necessary.
+
+IMPORTANT — Output format:
+Each step MUST follow this EXACT structure (replace N with the step number):
+  Thought N: <your reasoning>
+  Action N: <Type>[<arguments>]
+
+Rules:
+- "Thought N:" and "Action N:" must each appear exactly once per step, with the same N.
+- The label is always "Action N: <Type>[<args>]" — never nest another "Action M:" inside it.
+  WRONG:   Action 3: Action 2: RetrieveAgenda[meeting]
+  CORRECT: Action 3: RetrieveAgenda[meeting]
+- Keep each Thought concise (2-4 sentences). Long debugging monologues waste steps and may be truncated. If stuck, try a different approach instead of analyzing in circles.
+- After Finish[answer], the trajectory ends. Do not generate further Thoughts, Actions, or Observations."""

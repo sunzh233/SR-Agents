@@ -11,12 +11,23 @@ new tensors).
 """
 
 import json
+import os
 import threading
 from pathlib import Path
 
 import numpy as np
 
 EMBED_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
+# Offline fallback: search modelscope cache in project and home dirs
+if os.environ.get("HF_HUB_OFFLINE"):
+    _candidates = [
+        Path(__file__).resolve().parents[6] / ".cache" / "modelscope" / "sentence-transformers" / "all-mpnet-base-v2",
+        Path.home() / ".cache" / "modelscope" / "sentence-transformers" / "all-mpnet-base-v2",
+    ]
+    for _c in _candidates:
+        if (_c / "model.safetensors").exists():
+            EMBED_MODEL_NAME = str(_c)
+            break
 
 # Process-level cache: (corpus_path, text_field) -> TextRetriever (shared)
 _retriever_cache: dict[tuple[str, str], "TextRetriever"] = {}

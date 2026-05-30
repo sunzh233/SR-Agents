@@ -39,7 +39,8 @@ class DirectEngine:
         skill_texts = [s["content"] for s in skills if s.get("content")]
         system, user = build_prompt(instance, skills=skill_texts)
 
-        extra = get_extra_body(model, thinking=self.thinking)
+        base_model = kwargs.get("base_model", model)
+        extra = get_extra_body(base_model, thinking=self.thinking)
 
         tools = [t for s in skills for t in s.get("tools", [])]
 

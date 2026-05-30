@@ -87,7 +87,7 @@ def chat(
         kwargs["extra_body"] = extra_body
 
     response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content
+    return response.choices[0].message.content or ""
 
 
 def chat_messages(
@@ -112,4 +112,4 @@ def chat_messages(
         kwargs["extra_body"] = extra_body
 
     response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content
+    return response.choices[0].message.content or ""
