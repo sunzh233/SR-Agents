@@ -30,6 +30,7 @@ Tool schema (optional ``tools`` field in a skill)::
 """
 
 import ast
+import datetime as _datetime
 import math
 import re
 
@@ -94,7 +95,7 @@ def _parse_call_args(args_str: str, tool_def: dict) -> dict | None:
 
 def execute_tool(tool_def: dict, args: dict) -> str:
     """Run a tool implementation in a restricted namespace."""
-    namespace = {"__builtins__": _SAFE_BUILTINS, "math": math}
+    namespace = {"__builtins__": _SAFE_BUILTINS, "math": math, "datetime": _datetime}
     exec(tool_def["implementation"], namespace)  # noqa: S102
     func = namespace[tool_def["name"]]
     return str(func(**args))
