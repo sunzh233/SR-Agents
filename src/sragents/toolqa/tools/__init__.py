@@ -5,7 +5,38 @@ and ToolEnvironment for managing tool state and dispatching actions.
 """
 
 import re
+import threading
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Process-level shared SQLite state
+#
+# Every ToolEnvironment instance shares the same in-memory SQLite database
+# (via URI-mode shared-cache).  ``_sql_loaded_tables`` tracks which tables
+# have already been populated so ``to_sql()`` runs at most once per database
+# across all threads in the process.
+#
+# ``_sql_keeper`` is a persistent connection that outlives any individual
+# ToolEnvironment, preventing the shared in-memory DB from being reclaimed
+# when the last per-instance connection closes.
+# ---------------------------------------------------------------------------
+_SQL_SHARED_URI = "file:toolqa_shared?mode=memory&cache=shared"
+_sql_keeper: "sqlite3.Connection | None" = None
+_sql_keeper_lock = threading.Lock()
+_sql_loaded_tables: set[str] = set()
+_sql_loaded_tables_lock = threading.Lock()
+
+
+def _get_keeper_conn():
+    """Return (or create) the persistent keeper connection."""
+    global _sql_keeper
+    if _sql_keeper is not None:
+        return _sql_keeper
+    with _sql_keeper_lock:
+        if _sql_keeper is None:
+            import sqlite3
+            _sql_keeper = sqlite3.connect(_SQL_SHARED_URI, uri=True)
+        return _sql_keeper
 
 
 def parse_action(action_str: str) -> tuple[str, str] | tuple[None, None]:
@@ -45,17 +76,16 @@ class ToolEnvironment:
         self._agenda_retriever = None
         self._scirex_retriever = None
 
-        # Shared sqlite3 connection for SQLInterpreter (per-thread, not shared)
+        # SQLite: all instances share the same in-memory database via URI
+        # shared-cache.  Each instance lazily opens its own connection to it.
         self._sql_conn = None
-        self._sql_loaded_tables: set[str] = set()
 
     def reset(self) -> None:
         """Reset per-instance mutable state.
 
         Clears table filter state and graph attribute references without
-        rebuilding toolkit objects. The SQL connection and its loaded
-        tables are kept across instances — they hold read-only lookup
-        data. Text retrievers are shared globally and never reset.
+        rebuilding toolkit objects.  The shared SQLite database and
+        retrievers are never reset.
         """
         self.table.data = None
         self.graph.paper_net = None
@@ -69,7 +99,10 @@ class ToolEnvironment:
     def sql_conn(self):
         if self._sql_conn is None:
             import sqlite3
-            self._sql_conn = sqlite3.connect(":memory:")
+            # Ensure the keeper connection exists so the shared in-memory
+            # DB isn't reclaimed when this instance is destroyed.
+            _get_keeper_conn()
+            self._sql_conn = sqlite3.connect(_SQL_SHARED_URI, uri=True)
         return self._sql_conn
 
     def _get_agenda_retriever(self):
@@ -152,16 +185,17 @@ class ToolEnvironment:
         elif action_type == "LoadDB":
             try:
                 result = self.table.load_db(argument)
-                # Also load into sqlite3 for SQLInterpreter (skip if already loaded)
-                if (
-                    self.table.data is not None
-                    and argument not in self._sql_loaded_tables
-                ):
-                    self.table.data.to_sql(
-                        f"{argument}_data", self.sql_conn,
-                        if_exists="replace", index=False,
-                    )
-                    self._sql_loaded_tables.add(argument)
+                # Also load into shared sqlite3 for SQLInterpreter.
+                # Only the first thread that needs this database calls
+                # to_sql(); all others skip it via the process-level set.
+                if self.table.data is not None:
+                    with _sql_loaded_tables_lock:
+                        if argument not in _sql_loaded_tables:
+                            self.table.data.to_sql(
+                                f"{argument}_data", self.sql_conn,
+                                if_exists="replace", index=False,
+                            )
+                            _sql_loaded_tables.add(argument)
                 return result
             except Exception:
                 return ("The database you want to query is not in the list. "
