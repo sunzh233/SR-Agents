@@ -84,9 +84,9 @@ def _number_it(num) -> float | int | None:
 
 def _extract_answer(pred: str, answer_flag: bool = True) -> str:
     """Core answer extraction, ported from TheoremQA utils.py."""
-    if any(opt in pred.lower() for opt in ["yes", "true"]):
+    if re.search(r"\b(yes|true)\b", pred.lower()):
         return "True"
-    if any(opt in pred.lower() for opt in ["no", "false"]):
+    if re.search(r"\b(no|false)\b", pred.lower()):
         return "False"
     if any(opt in pred.lower() for opt in ["(a)", "(b)", "(c)", "(d)", "(e)", "(f)"]):
         return pred
@@ -115,11 +115,10 @@ def _extract_answer(pred: str, answer_flag: bool = True) -> str:
 def _extract(raw_output: str) -> str:
     pred = raw_output.strip("\n")
 
-    # Detect ICL leakage
-    icl = any(pred.count(t) > 1 for t in _TRIGGERS)
-    if icl:
-        pred = pred.split("\n\n")[0]
-
+    # ICL leakage detection removed (2026-06-23): student self-repetition of
+    # "the answer is" was misclassified as few-shot leakage, which discarded
+    # the answer (took the first paragraph instead of the last trigger segment).
+    # re.split below now always takes the last trigger segment (the answer).
     preds = re.split("|".join(re.escape(t) for t in _TRIGGERS), pred)
     if len(preds) > 1:
         answer_flag = True
