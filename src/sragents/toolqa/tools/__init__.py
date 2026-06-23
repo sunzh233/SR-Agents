@@ -171,14 +171,20 @@ class ToolEnvironment:
         elif action_type == "RetrieveAgenda":
             try:
                 return self._get_agenda_retriever().query(argument)
-            except Exception:
+            except Exception as e:
+                import traceback
+                print(f"  [RetrieveAgenda] query failed: {e}", flush=True)
+                traceback.print_exc()
                 return ("There is no information that can be matched "
                         "in the database. Please try another query.")
 
         elif action_type == "RetrieveScirex":
             try:
                 return self._get_scirex_retriever().query(argument)
-            except Exception:
+            except Exception as e:
+                import traceback
+                print(f"  [RetrieveScirex] query failed: {e}", flush=True)
+                traceback.print_exc()
                 return ("There is no information that can be matched "
                         "in the database. Please try another query.")
 

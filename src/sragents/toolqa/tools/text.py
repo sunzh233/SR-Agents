@@ -1,7 +1,10 @@
 """Text retrieval tools for ToolQA: RetrieveAgenda, RetrieveScirex.
 
 Uses sentence-transformers embeddings + numpy cosine similarity.
-Embedding model and corpus are lazy-loaded on the first query.
+Embeddings are persisted to disk (``.embeddings/`` next to each corpus)
+so subsequent processes skip the full GPU encode and load vectors
+directly. The model itself is lazy-loaded only when ``query()`` is
+actually called.
 
 Thread safety: ``TextRetriever`` instances are shared across threads
 via ``get_shared_retriever()``. ``_ensure_index()`` uses double-checked
@@ -72,10 +75,29 @@ class TextRetriever:
         self._embeddings: np.ndarray | None = None
         self._init_lock = threading.Lock()
 
-    def _ensure_index(self):
-        """Lazy-load corpus and build embedding index on first use.
+    # Module-level lock: prevents concurrent SentenceTransformer loads across
+    # threads (and within the same process).  Without this, the 24-worker
+    # ThreadPoolExecutor can trigger N simultaneous GPU allocations during the
+    # very first query(), causing CUDA OOM or AttributeError when the model
+    # stays None after a failed load.
+    _model_lock = threading.Lock()
 
-        Uses double-checked locking so concurrent threads don't duplicate work.
+    def _ensure_model(self):
+        """Lazy-load the sentence-transformers model on first query (thread-safe)."""
+        if self._model is not None:
+            return
+        with TextRetriever._model_lock:
+            # Double-check: another thread may have loaded while we waited
+            if self._model is not None:
+                return
+            import sentence_transformers
+            self._model = sentence_transformers.SentenceTransformer(self.model_name)
+
+    def _ensure_index(self):
+        """Lazy-load corpus embeddings on first use.
+
+        Cache hit: load (embeddings, texts) from disk, model stays unloaded.
+        Cache miss: read JSONL, encode, persist to disk for next run.
         """
         if self._embeddings is not None:
             return
@@ -84,7 +106,25 @@ class TextRetriever:
             if self._embeddings is not None:
                 return
 
-            # Load corpus texts
+            from sragents.toolqa.tools.embedding_cache import (
+                cache_path_for,
+                load_if_fresh,
+                save_atomic,
+            )
+            cache_path = cache_path_for(self.corpus_path, self.model_name)
+
+            # 1) Cache hit: load vectors + texts, skip GPU entirely
+            hit = load_if_fresh(
+                cache_path, self.corpus_path, self.model_name, self.text_field
+            )
+            if hit is not None:
+                self._embeddings, self._texts = hit
+                print(
+                    f"  Loaded {len(self._texts)} embeddings from cache: {cache_path}"
+                )
+                return
+
+            # 2) Cache miss: read JSONL, load model, encode, persist
             texts = []
             with open(self.corpus_path) as f:
                 for line in f:
@@ -95,21 +135,28 @@ class TextRetriever:
                     texts.append(item[self.text_field])
             self._texts = texts
 
-            # Load embedding model
-            import sentence_transformers
-            self._model = sentence_transformers.SentenceTransformer(self.model_name)
-
-            # Encode all documents
+            self._ensure_model()
             print(f"  Encoding {len(texts)} documents with {self.model_name}...")
             self._embeddings = self._model.encode(texts, show_progress_bar=True)
             # Normalize for cosine similarity
             norms = np.linalg.norm(self._embeddings, axis=1, keepdims=True)
             norms = np.where(norms == 0, 1, norms)
-            self._embeddings = self._embeddings / norms
+            self._embeddings = (self._embeddings / norms).astype(np.float32)
+
+            save_atomic(
+                cache_path,
+                self._embeddings,
+                self._texts,
+                self.corpus_path,
+                self.model_name,
+                self.text_field,
+            )
+            print(f"  Saved embeddings cache: {cache_path}")
 
     def query(self, query_text: str, top_k: int | None = None) -> str:
         """Return top-k most relevant documents as newline-separated text."""
         self._ensure_index()
+        self._ensure_model()
         k = top_k or self.top_k
 
         # Encode query
