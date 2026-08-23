@@ -5,8 +5,8 @@ from pathlib import Path
 
 from sragents.cli._common import parse_kv_list, require_exists
 from sragents.corpus import load_corpus, skill_text
-from sragents.prompts import build_prompt
 from sragents.retrieve import compute_retrieval_metrics, get, list_retrievers
+from sragents.retrieve.query import build_retrieval_query
 from sragents.retrieve.schema import RetrievalRecord, RetrievalResults
 
 
@@ -31,18 +31,6 @@ def add_parser(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _build_query(instance: dict) -> str:
-    """Concatenate user + system + (if ToolQA) few-shots as the query."""
-    system, user = build_prompt(instance)
-    parts = [user]
-    if system:
-        parts.append(system)
-    if instance["dataset"] == "toolqa":
-        from sragents.toolqa.fewshots import TOOLQA_EXAMPLES
-        parts.append(TOOLQA_EXAMPLES)
-    return "\n".join(parts)
-
-
 def run(args) -> None:
     require_exists(args.corpus, "corpus")
     require_exists(args.instances, "instances")
@@ -64,7 +52,7 @@ def run(args) -> None:
             continue
         queries.append({
             "instance_id": inst["instance_id"],
-            "query": _build_query(inst),
+            "query": build_retrieval_query(inst),
         })
         gold[inst["instance_id"]] = gold_ids
     print(f"Queries: {len(queries)}")

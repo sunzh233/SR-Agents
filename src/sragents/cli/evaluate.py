@@ -15,7 +15,7 @@ from sragents.evaluate import evaluate as evaluate_one
 from sragents.evaluate.metrics import compute_accuracy
 
 DEFAULT_WORKERS = 32
-_BCB_HARD_TIMEOUT = 300
+_BCB_HARD_TIMEOUT = float(os.environ.get("SRAGENTS_BCB_TIMEOUT", "600"))
 
 
 def add_parser(subparsers) -> None:
@@ -69,11 +69,20 @@ def _bcb_subprocess(
     )
     try:
         stdout, _ = p.communicate(timeout=_BCB_HARD_TIMEOUT)
-        if p.returncode == 0 and stdout.strip():
-            try:
-                return json.loads(stdout), None
-            except json.JSONDecodeError:
-                pass
+        if p.returncode == 0:
+            # Sandbox wrappers may print diagnostics before the child result.
+            # Parse the final JSON object rather than assuming clean stdout.
+            out = (
+                stdout.decode(errors="replace")
+                if isinstance(stdout, bytes) else stdout
+            )
+            for line in reversed(out.strip().splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        return json.loads(line), None
+                    except json.JSONDecodeError:
+                        continue
         return None, f"{instance_id} eval failed (exit={p.returncode})"
     except subprocess.TimeoutExpired:
         try:
@@ -133,7 +142,6 @@ def run(args) -> None:
     dataset = results[0]["dataset"]
     method = results[0].get("method", "unknown")
     model = results[0].get("model", "unknown")
-
     # All records must belong to the same (dataset, method, model) run.
     other_datasets = {r["dataset"] for r in results if r["dataset"] != dataset}
     if other_datasets:
@@ -178,6 +186,15 @@ def run(args) -> None:
         print(f"  WARN: {w}")
 
     details_clean = [d for d in details if d is not None]
+    expected_ids = [str(result["instance_id"]) for result in results]
+    actual_ids = [str(detail["instance_id"]) for detail in details_clean]
+    if (warnings or len(actual_ids) != len(set(actual_ids))
+            or set(actual_ids) != set(expected_ids)):
+        sys.exit(
+            "sragents: error: evaluation coverage differs from inference: "
+            f"rows={len(actual_ids)}, expected={len(expected_ids)}, "
+            f"warnings={len(warnings)}"
+        )
     metrics = compute_accuracy(details_clean)
 
     output = {
@@ -185,7 +202,9 @@ def run(args) -> None:
         "metrics": metrics, "details": details_clean,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+    temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+    temporary.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+    temporary.replace(args.output)
 
     print(f"\n  {metrics['correct']}/{metrics['total']} correct "
           f"({metrics['accuracy']:.4f})")

@@ -30,7 +30,6 @@ Tool schema (optional ``tools`` field in a skill)::
 """
 
 import ast
-import datetime as _datetime
 import math
 import re
 
@@ -50,8 +49,27 @@ _SAFE_BUILTINS = {
     "True": True, "False": False, "None": None,
     "range": range, "enumerate": enumerate, "zip": zip,
     "isinstance": isinstance,
-    "__import__": __import__,
 }
+
+
+def _safe_import(name, *args, **kwargs):
+    """Whitelisted import for the tool sandbox.
+
+    MedCalc date tools execute ``from datetime import ...`` inside the
+    restricted namespace, so their imports must pass through this function.
+    Only the standard-library date-parsing modules are admitted; unrestricted
+    imports remain disabled.
+    """
+    import importlib
+    if name in ("datetime", "_strptime", "time", "re"):
+        # datetime.strptime lazily loads _strptime, whose module-level imports
+        # of time and re also pass through the sandbox. Everything else (os,
+        # sys, subprocess, and so on) remains unavailable.
+        return importlib.import_module(name)
+    raise ImportError(f"module {name!r} is not allowed in the tool sandbox")
+
+
+_SAFE_BUILTINS["__import__"] = _safe_import
 
 
 def parse_tool_call(
@@ -96,7 +114,7 @@ def _parse_call_args(args_str: str, tool_def: dict) -> dict | None:
 
 def execute_tool(tool_def: dict, args: dict) -> str:
     """Run a tool implementation in a restricted namespace."""
-    namespace = {"__builtins__": _SAFE_BUILTINS, "math": math, "datetime": _datetime}
+    namespace = {"__builtins__": _SAFE_BUILTINS, "math": math}
     exec(tool_def["implementation"], namespace)  # noqa: S102
     func = namespace[tool_def["name"]]
     return str(func(**args))

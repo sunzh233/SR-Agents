@@ -34,8 +34,8 @@ def solution():
     golf_balls_lost_tuesday = 23
     golf_balls_lost_wednesday = 2
     golf_balls_left = golf_balls_initial - golf_balls_lost_tuesday - golf_balls_lost_wednesday
-    result = golf_balls_left
-    return result]
+    return golf_balls_left
+ans = solution()]
 Observation 1: 33
 Thought 2: After execution of Python Code, we know that the answer is 33.
 Action 2: Finish[33]

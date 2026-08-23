@@ -16,7 +16,9 @@ def create_llm_client(
     """Create OpenAI-compatible client (works with vLLM, OpenAI, etc.)."""
     base_url = api_base or os.environ.get("OPENAI_API_BASE")
     key = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
-    return OpenAI(base_url=base_url, api_key=key)
+    # Large concurrent runs can queue behind one model server for longer than
+    # the SDK default; use one shared explicit timeout for all callers.
+    return OpenAI(base_url=base_url, api_key=key, timeout=3600)
 
 
 _THINK_CLOSED_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)

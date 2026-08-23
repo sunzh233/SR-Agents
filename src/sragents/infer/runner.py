@@ -22,34 +22,41 @@ _write_lock = threading.Lock()
 
 
 def _already_done(out_path: Path) -> set[str]:
-    """Return completed instance_ids. Truncates any trailing partial
-    line from a previous interrupted write so the resume append starts
-    on a clean record boundary."""
+    """Return successful instance IDs and make failed rows retryable.
+
+    A provider/model exception is a record of an attempt, not completion.
+    Resume therefore atomically removes error rows (and any trailing partial
+    line) while retaining one successful row per instance.
+    """
     if not out_path.exists():
         return set()
     done: set[str] = set()
-    good_bytes = 0
     with open(out_path, "rb") as f:
         data = f.read()
+    kept: list[bytes] = []
     for raw in data.splitlines(keepends=True):
         stripped = raw.decode("utf-8", errors="replace").strip()
         if not stripped:
-            good_bytes += len(raw)
             continue
         if not raw.endswith(b"\n"):
             # Trailing partial line — don't count, don't advance.
             break
         try:
             rec = json.loads(stripped)
-            done.add(rec["instance_id"])
-            good_bytes += len(raw)
+            instance_id = rec["instance_id"]
+            if (rec.get("error") or not str(rec.get("raw_output", "")).strip()
+                    or instance_id in done):
+                continue
+            done.add(instance_id)
+            kept.append((stripped + "\n").encode("utf-8"))
         except (json.JSONDecodeError, KeyError):
-            # Stop at the first malformed line so the truncate below
-            # rewinds to the end of the last good record.
+            # Stop at the first malformed line; later bytes cannot be trusted.
             break
-    if good_bytes < len(data):
-        with open(out_path, "rb+") as f:
-            f.truncate(good_bytes)
+    cleaned = b"".join(kept)
+    if cleaned != data:
+        temporary = out_path.with_suffix(out_path.suffix + ".resume.tmp")
+        temporary.write_bytes(cleaned)
+        temporary.replace(out_path)
     return done
 
 

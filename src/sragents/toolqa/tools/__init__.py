@@ -8,18 +8,10 @@ import re
 import threading
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Process-level shared SQLite state
-#
-# Every ToolEnvironment instance shares the same in-memory SQLite database
-# (via URI-mode shared-cache).  ``_sql_loaded_tables`` tracks which tables
-# have already been populated so ``to_sql()`` runs at most once per database
-# across all threads in the process.
-#
-# ``_sql_keeper`` is a persistent connection that outlives any individual
-# ToolEnvironment, preventing the shared in-memory DB from being reclaimed
-# when the last per-instance connection closes.
-# ---------------------------------------------------------------------------
+# Every ToolEnvironment uses its own connection to one process-wide in-memory
+# SQLite database.  The keeper connection preserves the database lifetime,
+# while the loaded-table set avoids copying the same read-only table once per
+# worker thread.
 _SQL_SHARED_URI = "file:toolqa_shared?mode=memory&cache=shared"
 _sql_keeper: "sqlite3.Connection | None" = None
 _sql_keeper_lock = threading.Lock()
@@ -28,7 +20,7 @@ _sql_loaded_tables_lock = threading.Lock()
 
 
 def _get_keeper_conn():
-    """Return (or create) the persistent keeper connection."""
+    """Return the persistent connection that owns the shared database."""
     global _sql_keeper
     if _sql_keeper is not None:
         return _sql_keeper
@@ -76,16 +68,15 @@ class ToolEnvironment:
         self._agenda_retriever = None
         self._scirex_retriever = None
 
-        # SQLite: all instances share the same in-memory database via URI
-        # shared-cache.  Each instance lazily opens its own connection to it.
+        # Per-environment connection to the process-wide read-only tables.
         self._sql_conn = None
 
     def reset(self) -> None:
         """Reset per-instance mutable state.
 
         Clears table filter state and graph attribute references without
-        rebuilding toolkit objects.  The shared SQLite database and
-        retrievers are never reset.
+        rebuilding toolkit objects. The process-wide SQLite database and text
+        retrievers are retained across instances.
         """
         self.table.data = None
         self.graph.paper_net = None
@@ -99,8 +90,6 @@ class ToolEnvironment:
     def sql_conn(self):
         if self._sql_conn is None:
             import sqlite3
-            # Ensure the keeper connection exists so the shared in-memory
-            # DB isn't reclaimed when this instance is destroyed.
             _get_keeper_conn()
             self._sql_conn = sqlite3.connect(_SQL_SHARED_URI, uri=True)
         return self._sql_conn
@@ -171,9 +160,9 @@ class ToolEnvironment:
         elif action_type == "RetrieveAgenda":
             try:
                 return self._get_agenda_retriever().query(argument)
-            except Exception as e:
+            except Exception as exc:
                 import traceback
-                print(f"  [RetrieveAgenda] query failed: {e}", flush=True)
+                print(f"  [RetrieveAgenda] query failed: {exc}", flush=True)
                 traceback.print_exc()
                 return ("There is no information that can be matched "
                         "in the database. Please try another query.")
@@ -181,9 +170,9 @@ class ToolEnvironment:
         elif action_type == "RetrieveScirex":
             try:
                 return self._get_scirex_retriever().query(argument)
-            except Exception as e:
+            except Exception as exc:
                 import traceback
-                print(f"  [RetrieveScirex] query failed: {e}", flush=True)
+                print(f"  [RetrieveScirex] query failed: {exc}", flush=True)
                 traceback.print_exc()
                 return ("There is no information that can be matched "
                         "in the database. Please try another query.")
@@ -191,9 +180,6 @@ class ToolEnvironment:
         elif action_type == "LoadDB":
             try:
                 result = self.table.load_db(argument)
-                # Also load into shared sqlite3 for SQLInterpreter.
-                # Only the first thread that needs this database calls
-                # to_sql(); all others skip it via the process-level set.
                 if self.table.data is not None:
                     with _sql_loaded_tables_lock:
                         if argument not in _sql_loaded_tables:

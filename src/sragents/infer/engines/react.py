@@ -51,8 +51,10 @@ class ReActAgent:
         thinking: bool = False,
         candidate_skills: list[dict] | None = None,
         corpus: dict | None = None,
+        temperature: float = 0.7,
     ):
         self.question = question
+        self.temperature = temperature
         self.tools = tools
         self.client = client
         self.model = model
@@ -89,7 +91,7 @@ class ReActAgent:
 
         response = chat(
             self.client, self.model, user, system=system,
-            temperature=0.7, max_tokens=self.max_tokens,
+            temperature=self.temperature, max_tokens=self.max_tokens,
             stop=stop, extra_body=extra,
         )
         thought, action = self._parse_response(response)
@@ -285,9 +287,11 @@ class _BaseReActEngine:
         max_tokens: int | None = None,
         thinking: bool = False,
         toolqa_data_dir: str | None = None,
+        temperature: float = 0.7,
     ):
         self.max_steps = max_steps
         self.max_tokens = max_tokens
+        self.temperature = temperature
         self.thinking = thinking
         self._toolqa_data_dir = toolqa_data_dir or str(EXTERNAL_DIR / "toolqa")
         self._local = threading.local()
@@ -326,6 +330,7 @@ class _BaseReActEngine:
                 max_steps=self.max_steps, max_tokens=step_tokens,
                 thinking=self.thinking,
                 candidate_skills=skills, corpus=corpus,
+                temperature=self.temperature,
             )
         else:
             skill_texts = [s["content"] for s in skills if s.get("content")]
@@ -337,6 +342,7 @@ class _BaseReActEngine:
                 max_steps=self.max_steps, max_tokens=step_tokens,
                 skills=skill_texts or None,
                 thinking=self.thinking,
+                temperature=self.temperature,
             )
 
         agent.run()

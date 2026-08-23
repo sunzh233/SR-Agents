@@ -102,6 +102,18 @@ def _bge_factory(
     )
 
 
+@register("bge_m3")
+def _bge_m3_factory(
+    model_path: str = "BAAI/bge-m3",
+    batch_size: int = 256,
+) -> DenseRetriever:
+    return DenseRetriever(
+        model_name_or_path=model_path,
+        query_prefix="",
+        batch_size=batch_size,
+    )
+
+
 @register("contriever")
 def _contriever_factory(
     model_path: str = "facebook/contriever-msmarco",
