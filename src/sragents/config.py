@@ -1,10 +1,11 @@
 """Configuration and path constants."""
 
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-EXTERNAL_DIR = DATA_DIR / "external"
+EXTERNAL_DIR = Path(os.environ.get("SRAGENTS_EXTERNAL_DIR", DATA_DIR / "external"))
 BENCH_DIR = DATA_DIR / "bench"
 CORPUS_PATH = BENCH_DIR / "corpus" / "corpus.json"
 INSTANCES_DIR = BENCH_DIR / "instances"
