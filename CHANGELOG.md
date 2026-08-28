@@ -12,8 +12,6 @@
   heavily queued model servers.
 - Parse BigCodeBench subprocess results even when sandbox diagnostics precede
   the final JSON line.
-- Restrict executable skill imports to date-parsing modules required by
-  MedCalc tools.
 - Reuse ToolQA SQLite tables across worker threads instead of copying the same
   read-only data into every environment.
 - Add content-addressed, cross-process ToolQA embedding caches suitable for
