@@ -6,6 +6,7 @@ Config via CLI args (--model, --api-base) and env vars (OPENAI_API_BASE, OPENAI_
 
 import os
 import re
+from dataclasses import dataclass
 
 from openai import OpenAI
 
@@ -61,7 +62,14 @@ def get_extra_body(model: str, thinking: bool = False) -> dict | None:
     return None
 
 
-def chat(
+@dataclass(frozen=True)
+class ChatResult:
+    content: str
+    finish_reason: str
+    completion_tokens: int | None
+
+
+def chat_with_metadata(
     client: OpenAI,
     model: str,
     prompt: str,
@@ -70,8 +78,8 @@ def chat(
     max_tokens: int = 2048,
     stop: list[str] | None = None,
     extra_body: dict | None = None,
-) -> str:
-    """Send chat completion request, return content string."""
+) -> ChatResult:
+    """Send one chat request and retain the length-control metadata."""
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -89,7 +97,33 @@ def chat(
         kwargs["extra_body"] = extra_body
 
     response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content or ""
+    choice = response.choices[0]
+    usage = getattr(response, "usage", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    return ChatResult(
+        content=choice.message.content or "",
+        finish_reason=getattr(choice, "finish_reason", None) or "stop",
+        completion_tokens=(
+            int(completion_tokens) if completion_tokens is not None else None
+        ),
+    )
+
+
+def chat(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system: str | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 2048,
+    stop: list[str] | None = None,
+    extra_body: dict | None = None,
+) -> str:
+    """Send chat completion request, return content string."""
+    return chat_with_metadata(
+        client, model, prompt, system=system, temperature=temperature,
+        max_tokens=max_tokens, stop=stop, extra_body=extra_body,
+    ).content
 
 
 def chat_messages(

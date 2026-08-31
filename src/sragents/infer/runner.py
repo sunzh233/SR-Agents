@@ -44,7 +44,10 @@ def _already_done(out_path: Path) -> set[str]:
         try:
             rec = json.loads(stripped)
             instance_id = rec["instance_id"]
-            if (rec.get("error") or not str(rec.get("raw_output", "")).strip()
+            model_failed = bool(rec.get("meta", {}).get("failed"))
+            if (rec.get("error")
+                    or (not str(rec.get("raw_output", "")).strip()
+                        and not model_failed)
                     or instance_id in done):
                 continue
             done.add(instance_id)

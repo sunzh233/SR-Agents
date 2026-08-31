@@ -40,7 +40,10 @@ def _one(result: dict, instances: dict) -> tuple[dict | None, str | None]:
     if inst is None:
         return None, f"instance {result['instance_id']} not found"
 
-    raw = result.get("raw_output", "")
+    raw = (
+        "" if bool(result.get("meta", {}).get("failed"))
+        else result.get("raw_output", "")
+    )
     out = evaluate_one(raw, inst)
     return ({
         "instance_id": result["instance_id"],

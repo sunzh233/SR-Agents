@@ -27,12 +27,21 @@ import threading
 from sragents.config import EXTERNAL_DIR
 from sragents.corpus import display_name, load_corpus_dict
 from sragents.infer.base import InferenceResult, register_engine
-from sragents.llm import chat, get_extra_body, strip_think_tags
+from sragents.llm import chat_with_metadata, get_extra_body, strip_think_tags
 from sragents.prompts import build_prompt
 from sragents.toolqa import ToolEnvironment, parse_action
 
 _MAX_OBS_CHARS = 3000
 _MAX_THOUGHT_CHARS = 4000
+
+
+def _is_context_limit_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return (
+        "maximum context length" in message
+        or "context length exceeded" in message
+        or ("input tokens" in message and "max_tokens" in message)
+    )
 
 
 class ReActAgent:
@@ -47,20 +56,24 @@ class ReActAgent:
         examples: str,
         max_steps: int = 20,
         max_tokens: int = 512,
+        total_max_tokens: int | None = None,
         skills: list[str] | None = None,
         thinking: bool = False,
         candidate_skills: list[dict] | None = None,
         corpus: dict | None = None,
         temperature: float = 0.7,
+        base_model: str | None = None,
     ):
         self.question = question
         self.temperature = temperature
         self.tools = tools
         self.client = client
         self.model = model
+        self.base_model = base_model or model
         self.examples = examples
         self.max_steps = max_steps
         self.max_tokens = max_tokens
+        self.total_max_tokens = total_max_tokens
         self.skills = skills
         self.thinking = thinking
 
@@ -77,23 +90,57 @@ class ReActAgent:
         self.step_n = 1
         self.finished = False
         self.answer = ""
+        self.completion_tokens = 0
+        self.truncated = False
+        self.limit_exceeded = False
+        self.stop_reason: str | None = None
 
     def run(self) -> None:
-        while not self.finished and self.step_n <= self.max_steps:
+        while (
+            not self.finished
+            and not self.truncated
+            and self.step_n <= self.max_steps
+        ):
             self._step()
 
     def _step(self) -> None:
         system, user = self._build_prompt()
-        extra = get_extra_body(self.model, thinking=self.thinking)
+        extra = get_extra_body(self.base_model, thinking=self.thinking)
 
-        basename = self.model.lower().rsplit("/", 1)[-1]
+        basename = self.base_model.lower().rsplit("/", 1)[-1]
         stop = None if "gpt-5" in basename else [f"\nObservation {self.step_n}:"]
 
-        response = chat(
-            self.client, self.model, user, system=system,
-            temperature=self.temperature, max_tokens=self.max_tokens,
-            stop=stop, extra_body=extra,
-        )
+        request_tokens = self.max_tokens
+        if self.total_max_tokens is not None:
+            remaining = self.total_max_tokens - self.completion_tokens
+            if remaining <= 0:
+                self.truncated = True
+                self.limit_exceeded = True
+                self.stop_reason = "total_output_limit"
+                return
+            request_tokens = min(request_tokens, remaining)
+
+        try:
+            result = chat_with_metadata(
+                self.client, self.model, user, system=system,
+                temperature=self.temperature, max_tokens=request_tokens,
+                stop=stop, extra_body=extra,
+            )
+        except Exception as error:
+            if not _is_context_limit_error(error):
+                raise
+            self.truncated = True
+            self.limit_exceeded = True
+            self.stop_reason = "context_limit"
+            return
+
+        if result.completion_tokens is None:
+            raise RuntimeError(
+                "ReAct token budgeting requires completion_tokens in the "
+                "OpenAI-compatible response usage"
+            )
+        self.completion_tokens += result.completion_tokens
+        response = result.content
         thought, action = self._parse_response(response)
 
         step_text = (
@@ -102,6 +149,13 @@ class ReActAgent:
         )
         self.model_scratchpad += step_text
         self.scratchpad += step_text
+
+        if result.finish_reason == "length":
+            self.truncated = True
+            self.limit_exceeded = True
+            self.stop_reason = "step_output_limit"
+            self.step_n += 1
+            return
 
         self.scratchpad += f"\nObservation {self.step_n}: "
 
@@ -138,6 +192,14 @@ class ReActAgent:
                 self.scratchpad += self._truncate_obs(obs)
 
         self.step_n += 1
+        if (
+            not self.finished
+            and self.total_max_tokens is not None
+            and self.completion_tokens >= self.total_max_tokens
+        ):
+            self.truncated = True
+            self.limit_exceeded = True
+            self.stop_reason = "total_output_limit"
 
     def _build_prompt(self) -> tuple[str, str]:
         inst = {"dataset": "toolqa", "question": self.question}
@@ -274,10 +336,10 @@ class ReActAgent:
         return self.step_n > self.max_steps and not self.finished
 
 
-# Step token budget: thinking mode needs room for the <think> block on top of
-# the Thought/Action line. Per-step truncation wastes a ReAct step and
-# compounds across the trajectory.
-_STEP_TOKENS = 4096
+# A ReAct engine's configured max_tokens is the whole-trajectory output budget.
+# Each individual call stays bounded so a growing scratchpad retains context
+# headroom. Thinking mode needs more room for its hidden block.
+_STEP_TOKENS = 6144
 _STEP_TOKENS_THINKING = 16384
 _MAX_STEPS = 20
 
@@ -319,10 +381,7 @@ class _BaseReActEngine:
     ) -> InferenceResult:
         from sragents.toolqa.fewshots import TOOLQA_EXAMPLES
 
-        if self.max_tokens is not None:
-            step_tokens = self.max_tokens
-        else:
-            step_tokens = _STEP_TOKENS_THINKING if self.thinking else _STEP_TOKENS
+        step_tokens = _STEP_TOKENS_THINKING if self.thinking else _STEP_TOKENS
         corpus = kwargs.get("corpus") or (
             load_corpus_dict() if self._USE_PROGRESSIVE_DISCLOSURE else {}
         )
@@ -333,7 +392,9 @@ class _BaseReActEngine:
                 tools=self._get_tools(),
                 client=client, model=model,
                 examples=TOOLQA_EXAMPLES,
+                base_model=kwargs.get("base_model", model),
                 max_steps=self.max_steps, max_tokens=step_tokens,
+                total_max_tokens=self.max_tokens,
                 thinking=self.thinking,
                 candidate_skills=skills, corpus=corpus,
                 temperature=self.temperature,
@@ -345,7 +406,9 @@ class _BaseReActEngine:
                 tools=self._get_tools(),
                 client=client, model=model,
                 examples=TOOLQA_EXAMPLES,
+                base_model=kwargs.get("base_model", model),
                 max_steps=self.max_steps, max_tokens=step_tokens,
+                total_max_tokens=self.max_tokens,
                 skills=skill_texts or None,
                 thinking=self.thinking,
                 temperature=self.temperature,
@@ -364,6 +427,15 @@ class _BaseReActEngine:
                 "n_steps": agent.step_n - 1,
                 "finished": agent.finished,
                 "halted": agent.is_halted(),
+                "failed": agent.truncated or agent.is_halted(),
+                "truncated": agent.truncated,
+                "limit_exceeded": agent.limit_exceeded,
+                "stop_reason": (
+                    agent.stop_reason
+                    or ("max_steps" if agent.is_halted() else None)
+                ),
+                "completion_tokens": agent.completion_tokens,
+                "max_tokens": agent.total_max_tokens,
             },
         )
 

@@ -74,8 +74,8 @@ def add_parser(subparsers) -> None:
                    help="Sampling temperature (forwarded to engines that "
                         "accept it; default: 0.7)")
     p.add_argument("--max-tokens", type=int, default=4096,
-                   help="Max tokens per generation (forwarded to engines "
-                        "that accept it; default: 4096)")
+                   help="Maximum output tokens (the cumulative trajectory "
+                        "budget for multi-step engines; default: 4096)")
     p.add_argument("--label", default=None,
                    help="Method label for output records. "
                         "Default: {provider}_{engine}.")
