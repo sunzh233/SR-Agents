@@ -21,16 +21,22 @@ from sragents.infer.schema import InferenceRecord
 _write_lock = threading.Lock()
 
 
-def _already_done(out_path: Path) -> set[str]:
-    """Return successful instance IDs and make failed rows retryable.
+def _already_done(
+    out_path: Path, retry_ids: set[str] | None = None,
+) -> set[str]:
+    """Return successful instance IDs and make selected failed rows retryable.
 
     A provider/model exception is a record of an attempt, not completion.
-    Resume therefore atomically removes error rows (and any trailing partial
-    line) while retaining one successful row per instance.
+    Resume therefore atomically removes failed rows belonging to this call
+    (and any trailing partial line), while retaining rows from other calls
+    that share the output file.  The latter matters when adapter waves append
+    to one result file: a later wave cannot retry an earlier wave after its
+    adapters have been unloaded.
     """
     if not out_path.exists():
         return set()
     done: set[str] = set()
+    seen: set[str] = set()
     with open(out_path, "rb") as f:
         data = f.read()
     kept: list[bytes] = []
@@ -45,10 +51,18 @@ def _already_done(out_path: Path) -> set[str]:
             rec = json.loads(stripped)
             instance_id = rec["instance_id"]
             model_failed = bool(rec.get("meta", {}).get("failed"))
-            if (rec.get("error")
-                    or (not str(rec.get("raw_output", "")).strip()
-                        and not model_failed)
-                    or instance_id in done):
+            if instance_id in seen:
+                continue
+            failed = bool(
+                rec.get("error")
+                or (not str(rec.get("raw_output", "")).strip()
+                    and not model_failed)
+            )
+            if failed and (retry_ids is None or instance_id in retry_ids):
+                continue
+            seen.add(instance_id)
+            if failed:
+                kept.append((stripped + "\n").encode("utf-8"))
                 continue
             done.add(instance_id)
             kept.append((stripped + "\n").encode("utf-8"))
@@ -88,7 +102,9 @@ def run_many(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    done = _already_done(output_path)
+    done = _already_done(
+        output_path, {str(instance["instance_id"]) for instance in instances},
+    )
     pending = [i for i in instances if i["instance_id"] not in done]
 
     if not pending:
@@ -104,6 +120,8 @@ def run_many(
         try:
             skills = provider.provide(inst)
             result = engine.run(inst, skills, client, model, **engine_kwargs)
+            if not str(result.raw_output).strip() and not result.meta.get("failed"):
+                raise RuntimeError("model returned empty output")
             return InferenceRecord(
                 instance_id=inst["instance_id"],
                 dataset=inst["dataset"],
