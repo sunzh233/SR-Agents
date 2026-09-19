@@ -4,6 +4,7 @@ Ported from the upstream reference implementation at
 https://github.com/ncbi-nlp/MedCalc-Bench (``evaluation/evaluate.py``).
 """
 
+import math
 import re
 
 from sragents.evaluate.base import register
@@ -83,7 +84,10 @@ def _safe_parse_number(s: str) -> float | None:
     if not s:
         return None
     try:
-        return float(s)
+        value = float(s)
+        # "inf"/"nan" parse successfully but are model garbage, not numbers;
+        # returning None scores them incorrect instead of crashing round().
+        return value if math.isfinite(value) else None
     except ValueError:
         pass
     m = re.match(r"^(-?\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)$", s)

@@ -6,6 +6,7 @@ https://github.com/TIGER-AI-Lab/TheoremQA (``utils.py`` + ``number_utils.py``).
 
 import math
 import re
+import signal
 
 from sragents.evaluate.base import register
 
@@ -54,27 +55,67 @@ def _floatify(num) -> float | int | None:
         return None
 
 
+class _ParseTimeout(Exception):
+    """Raised by SIGALRM when a pathological expression (e.g. 2^{2^{40}}) makes
+    latex2sympy/eval compute forever. Subclasses Exception so the existing
+    except-handlers score the row as unparseable (= incorrect) instead of
+    hanging the whole scoring worker."""
+
+
+def _alarm_handler(signum, frame):
+    raise _ParseTimeout()
+
+
+class _parse_timeout:
+    """Best-effort per-row CPU guard (5 s). No-ops off the main thread."""
+
+    def __enter__(self):
+        try:
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(5)
+        except (ValueError, OSError):
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            signal.alarm(0)
+        except (ValueError, OSError):
+            pass
+        return False
+
+
+def _has_pathological_power(expr: str) -> bool:
+    # 2**2**40-style towers run inside C-level long_pow, which never yields to
+    # SIGALRM — the only safe guard is refusing to eval them at all.
+    return "**" in expr and any(len(d) > 6 for d in re.findall(r"\d+", expr))
+
+
 def _number_it(num) -> float | int | None:
     if isinstance(num, (int, float)):
         return num
     num = _clean_units(str(num))
-    try:
-        from latex2sympy2 import latex2sympy
-        num = str(latex2sympy(num))
-    except Exception:
-        pass
+    with _parse_timeout():
+        try:
+            from latex2sympy2 import latex2sympy
+            num = str(latex2sympy(num))
+        except Exception:
+            pass
     result = _floatify(num)
     if result is not None:
         return result
-    try:
-        val = eval(num)  # noqa: S307
-        if isinstance(val, (list, tuple)):
-            val = val[0]
-        result = _floatify(val)
-        if result is not None:
-            return result
-    except Exception:
-        pass
+    with _parse_timeout():
+        try:
+            if _has_pathological_power(num):
+                raise _ParseTimeout()
+            val = eval(num)  # noqa: S307
+            if isinstance(val, (list, tuple)):
+                val = val[0]
+            result = _floatify(val)
+            if result is not None:
+                return result
+        except Exception:
+            pass
     return None
 
 
@@ -95,9 +136,12 @@ def _extract_answer(pred: str, answer_flag: bool = True) -> str:
         pred = pred.split("=")[-1].strip()
         pred = _clean_units(pred)
         try:
-            from latex2sympy2 import latex2sympy
-            tmp = str(latex2sympy(pred))
-            pred = str(eval(tmp))  # noqa: S307
+            with _parse_timeout():
+                from latex2sympy2 import latex2sympy
+                tmp = str(latex2sympy(pred))
+                if _has_pathological_power(tmp):
+                    raise _ParseTimeout()
+                pred = str(eval(tmp))  # noqa: S307
         except Exception:
             if re.match(r"-?[\d\.]+\s\D+$", pred):
                 pred = pred.split(" ")[0]
